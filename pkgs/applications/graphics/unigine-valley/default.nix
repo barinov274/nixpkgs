@@ -1,10 +1,15 @@
-{ lib, stdenv, fetchurl
+{ lib
+, stdenv
+, fetchurl
 
-# Build-time dependencies
+  # Build-time dependencies
 , makeWrapper
 , file
+, makeDesktopItem
+, imagemagick
+, copyDesktopItems
 
-# Runtime dependencies
+  # Runtime dependencies
 , fontconfig
 , freetype
 , libX11
@@ -12,104 +17,119 @@
 , libXinerama
 , libXrandr
 , libXrender
-, libGL
-, openal}:
+, libglvnd
+, openal
+}:
 
 let
   version = "1.0";
 
-  arch = if stdenv.hostPlatform.system == "x86_64-linux" then
-    "x64"
-  else if stdenv.hostPlatform.system == "i686-linux" then
-    "x86"
-  else
-    throw "Unsupported platform ${stdenv.hostPlatform.system}";
-
+  arch =
+    if stdenv.hostPlatform.system == "x86_64-linux" then
+      "x64"
+    else if stdenv.hostPlatform.system == "i686-linux" then
+      "x86"
+    else
+      throw "Unsupported platform ${stdenv.hostPlatform.system}";
 in
-  stdenv.mkDerivation rec {
-    pname = "unigine-valley";
-    inherit version;
+stdenv.mkDerivation rec {
+  pname = "unigine-valley";
+  inherit version;
 
-    src = fetchurl {
-      url = "http://assets.unigine.com/d/Unigine_Valley-${version}.run";
-      sha256 = "5f0c8bd2431118551182babbf5f1c20fb14e7a40789697240dcaf546443660f4";
-    };
+  src = fetchurl {
+    url = "https://m11-assets.unigine.com/d/Unigine_Valley-${version}.run";
+    sha256 = "5f0c8bd2431118551182babbf5f1c20fb14e7a40789697240dcaf546443660f4";
+  };
 
-    sourceRoot = "Unigine_Valley-${version}";
-    instPath = "lib/unigine/valley";
+  sourceRoot = "Unigine_Valley-${version}";
+  instPath = "lib/unigine/valley";
 
-    nativeBuildInputs = [file makeWrapper];
+  nativeBuildInputs = [ file makeWrapper imagemagick copyDesktopItems ];
 
-    libPath = lib.makeLibraryPath [
-      stdenv.cc.cc  # libstdc++.so.6
-      fontconfig
-      freetype
-      libX11
-      libXext
-      libXinerama
-      libXrandr
-      libXrender
-      libGL
-      openal
-    ];
+  libPath = lib.makeLibraryPath [
+    stdenv.cc.cc # libstdc++.so.6
+    fontconfig
+    freetype
+    libX11
+    libXext
+    libXinerama
+    libXrandr
+    libXrender
+    libglvnd
+    openal
+  ];
 
-    unpackPhase = ''
-      runHook preUnpack
+  unpackPhase = ''
+    runHook preUnpack
 
-      cp $src extractor.run
-      chmod +x extractor.run
-      ./extractor.run --target $sourceRoot
+    cp $src extractor.run
+    chmod +x extractor.run
+    ./extractor.run --target $sourceRoot
 
-      runHook postUnpack
-    '';
+    runHook postUnpack
+  '';
 
-    patchPhase = ''
-      runHook prePatch
+  postPatch = ''
+    # Patch ELF files.
+    elfs=$(find bin -type f | xargs file | grep ELF | cut -d ':' -f 1)
+    for elf in $elfs; do
+      patchelf --set-interpreter ${stdenv.cc.libc}/lib/ld-linux-x86-64.so.2 $elf || true
+    done
+  '';
 
-      # Patch ELF files.
-      elfs=$(find bin -type f | xargs file | grep ELF | cut -d ':' -f 1)
-      for elf in $elfs; do
-        patchelf --set-interpreter ${stdenv.cc.libc}/lib/ld-linux-x86-64.so.2 $elf || true
-      done
+  installPhase = ''
+    runHook preInstall
 
-      runHook postPatch
-    '';
+    instdir=$out/${instPath}
+    mkdir -p $out/share/icons/hicolor $out/share/applications $out/bin $instdir/bin
 
-    installPhase = ''
-      runHook preInstall
+    # Install executables and libraries
+    install -m 0755 bin/browser_${arch} $instdir/bin
+    install -m 0755 bin/libApp{Stereo,Surround,Wall}_${arch}.so $instdir/bin
+    install -m 0755 bin/libGPUMonitor_${arch}.so $instdir/bin
+    install -m 0755 bin/libQt{Core,Gui,Network,WebKit,Xml}Unigine_${arch}.so.4 $instdir/bin
+    install -m 0755 bin/libUnigine_${arch}.so $instdir/bin
+    install -m 0755 bin/valley_${arch} $instdir/bin
+    install -m 0755 valley $instdir
+    install -m 0755 valley $out/bin/valley
 
-      instdir=$out/${instPath}
+    # Install other files
+    cp -R data documentation $instdir
 
-      # Install executables and libraries
-      mkdir -p $instdir/bin
-      install -m 0755 bin/browser_${arch} $instdir/bin
-      install -m 0755 bin/libApp{Stereo,Surround,Wall}_${arch}.so $instdir/bin
-      install -m 0755 bin/libGPUMonitor_${arch}.so $instdir/bin
-      install -m 0755 bin/libQt{Core,Gui,Network,WebKit,Xml}Unigine_${arch}.so.4 $instdir/bin
-      install -m 0755 bin/libUnigine_${arch}.so $instdir/bin
-      install -m 0755 bin/valley_${arch} $instdir/bin
-      install -m 0755 valley $instdir
+    # Install and wrap executable
+    wrapProgram $out/bin/valley \
+      --run "cd $instdir" \
+      --prefix LD_LIBRARY_PATH : /run/opengl-driver/lib:$instdir/bin:$libPath
 
-      # Install other files
-      cp -R data documentation $instdir
+    # Make desktop Icon
+    convert $out/lib/unigine/valley/data/launcher/icon.png -resize 128x128 $out/share/icons/Valley.png
+    for RES in 16 24 32 48 64 128 256
+    do
+        mkdir -p $out/share/icons/hicolor/"$RES"x"$RES"/apps
+        convert $out/lib/unigine/valley/data/launcher/icon.png -resize "$RES"x"$RES" $out/share/icons/hicolor/"$RES"x"$RES"/apps/Valley.png
+    done
 
-      # Install and wrap executable
-      mkdir -p $out/bin
-      install -m 0755 valley $out/bin/valley
-      wrapProgram $out/bin/valley \
-        --run "cd $instdir" \
-        --prefix LD_LIBRARY_PATH : /run/opengl-driver/lib:$instdir/bin:$libPath
+    runHook postInstall
+  '';
 
-      runHook postInstall
-    '';
+  desktopItems = [
+    (makeDesktopItem {
+      name = "Valley";
+      exec = "valley";
+      genericName = "A GPU Stress test tool from the UNIGINE";
+      icon = "Valley";
+      desktopName = "Valley Benchmark";
+    })
+  ];
 
-    stripDebugList = ["${instPath}/bin"];
+  stripDebugList = [ "${instPath}/bin" ];
 
-    meta = {
-      description = "The Unigine Valley GPU benchmarking tool";
-      homepage = "https://unigine.com/products/benchmarks/valley/";
-      license = lib.licenses.unfree; # see also: $out/$instPath/documentation/License.pdf
-      maintainers = [ lib.maintainers.kierdavis ];
-      platforms = ["x86_64-linux" "i686-linux"];
-    };
-  }
+  meta = {
+    description = "The Unigine Valley GPU benchmarking tool";
+    homepage = "https://unigine.com/products/benchmarks/valley/";
+    license = lib.licenses.unfree; # see also: $out/$instPath/documentation/License.pdf
+    maintainers = [ lib.maintainers.kierdavis ];
+    platforms = [ "x86_64-linux" "i686-linux" ];
+  };
+}
+
